@@ -24,15 +24,20 @@ pg_test = []
 [dependencies]
 pgrx = "=0.14.3"
 # Geometry processing libraries
-geo = "0.28"
-geo-types = "0.7"
-wkt = "0.10"
-wkb = "0.8"
+geo = "~0.30"
+geo-types = "~0.7"
+wkt = "~0.14"
+wkb = "~0.9"
 geojson = "0.24"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"
 byteorder = "1.5"
+# Spatial indexing with R*-tree
+rstar = "0.12"
+# GeoArrow for vectorized operations (stable crates only)
+geoarrow-array = "~0.4"
+geoarrow-schema = "~0.4"
 
 [dev-dependencies]
 pgrx-tests = "=0.14.3"
@@ -41,6 +46,10 @@ proptest = "1.4"
 
 [[bench]]
 name = "geometry_benchmarks"
+harness = false
+
+[[bench]]
+name = "enhanced_benchmarks"
 harness = false
 
 [profile.dev]

@@ -1,5 +1,7 @@
 use crate::geometry::Geometry;
 use pgrx::prelude::*;
+use rstar::{PointDistance, RTree, RTreeObject, AABB};
+use serde::{Deserialize, Serialize};
 
 /// Bounding box type for spatial indexing
 /// This represents a 2D rectangular bounding box with min/max x,y coordinates
@@ -104,6 +106,191 @@ impl BBox {
     }
 }
 
+/// Wrapper for geometry with ID for use in spatial index
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeometryWithId {
+    pub id: i64,
+    pub geometry: Geometry,
+    pub bbox: BBox,
+}
+
+impl GeometryWithId {
+    pub fn new(id: i64, geometry: Geometry) -> Self {
+        let bbox = BBox::from_geometry(&geometry);
+        Self { id, geometry, bbox }
+    }
+}
+
+/// Implement RTreeObject for our geometry wrapper to enable rstar indexing
+impl RTreeObject for GeometryWithId {
+    type Envelope = AABB<[f64; 2]>;
+
+    fn envelope(&self) -> Self::Envelope {
+        AABB::from_corners(
+            [self.bbox.min_x, self.bbox.min_y],
+            [self.bbox.max_x, self.bbox.max_y],
+        )
+    }
+}
+
+/// Implement PointDistance for distance-based queries
+impl PointDistance for GeometryWithId {
+    fn distance_2(&self, point: &[f64; 2]) -> f64 {
+        // Calculate distance from point to geometry's bounding box center
+        let center_x = (self.bbox.min_x + self.bbox.max_x) / 2.0;
+        let center_y = (self.bbox.min_y + self.bbox.max_y) / 2.0;
+
+        let dx = center_x - point[0];
+        let dy = center_y - point[1];
+
+        dx * dx + dy * dy
+    }
+}
+
+/// High-performance spatial index using R*-tree
+pub struct SpatialIndex {
+    rtree: RTree<GeometryWithId>,
+}
+
+impl SpatialIndex {
+    /// Create a new empty spatial index
+    pub fn new() -> Self {
+        Self {
+            rtree: RTree::new(),
+        }
+    }
+
+    /// Create spatial index from a collection of geometries
+    pub fn from_geometries(geometries: Vec<GeometryWithId>) -> Self {
+        Self {
+            rtree: RTree::bulk_load(geometries),
+        }
+    }
+
+    /// Insert a geometry into the index
+    pub fn insert(&mut self, geom_with_id: GeometryWithId) {
+        self.rtree.insert(geom_with_id);
+    }
+
+    /// Remove a geometry from the index
+    pub fn remove(&mut self, geom_with_id: &GeometryWithId) -> bool {
+        self.rtree.remove(geom_with_id).is_some()
+    }
+
+    /// Find all geometries that intersect with the given bounding box
+    pub fn query_bbox(&self, bbox: &BBox) -> Vec<&GeometryWithId> {
+        let envelope = AABB::from_corners([bbox.min_x, bbox.min_y], [bbox.max_x, bbox.max_y]);
+        self.rtree.locate_in_envelope(&envelope).collect()
+    }
+
+    /// Find the nearest neighbor to a point
+    pub fn nearest_neighbor(&self, point: [f64; 2]) -> Option<&GeometryWithId> {
+        self.rtree.nearest_neighbor(&point)
+    }
+
+    /// Find k nearest neighbors to a point
+    pub fn k_nearest_neighbors(&self, point: [f64; 2], k: usize) -> Vec<&GeometryWithId> {
+        self.rtree.nearest_neighbor_iter(&point).take(k).collect()
+    }
+
+    /// Find all geometries within distance of a point
+    pub fn within_distance(&self, point: [f64; 2], distance: f64) -> Vec<&GeometryWithId> {
+        self.rtree
+            .locate_within_distance(point, distance * distance) // rstar uses squared distance
+            .collect()
+    }
+
+    /// Get statistics about the index
+    pub fn size(&self) -> usize {
+        self.rtree.size()
+    }
+
+    /// Check if the index is empty
+    pub fn is_empty(&self) -> bool {
+        self.rtree.size() == 0
+    }
+
+    /// Get all geometries in the index
+    pub fn iter(&self) -> impl Iterator<Item = &GeometryWithId> {
+        self.rtree.iter()
+    }
+}
+
+impl Default for SpatialIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// PostgreSQL function to demonstrate R*-tree functionality
+#[pg_extern(immutable, parallel_safe)]
+pub fn create_rtree_demo(num_points: i32) -> String {
+    let mut geometries = Vec::new();
+
+    // Create test points
+    for i in 0..num_points {
+        let x = (i as f64 * 1.123) % 100.0;
+        let y = (i as f64 * 2.456) % 100.0;
+        let geom = crate::functions::make_point(x, y);
+        geometries.push(GeometryWithId::new(i as i64, geom));
+    }
+
+    let index = SpatialIndex::from_geometries(geometries);
+
+    format!("Created R*-tree index with {} points", index.size())
+}
+
+/// PostgreSQL function to demonstrate nearest neighbor search
+#[pg_extern(immutable, parallel_safe)]
+pub fn rtree_nearest_neighbor_demo(num_points: i32, query_x: f64, query_y: f64) -> i64 {
+    let mut geometries = Vec::new();
+
+    // Create test points
+    for i in 0..num_points {
+        let x = (i as f64 * 1.123) % 100.0;
+        let y = (i as f64 * 2.456) % 100.0;
+        let geom = crate::functions::make_point(x, y);
+        geometries.push(GeometryWithId::new(i as i64, geom));
+    }
+
+    let index = SpatialIndex::from_geometries(geometries);
+
+    if let Some(nearest) = index.nearest_neighbor([query_x, query_y]) {
+        nearest.id
+    } else {
+        -1
+    }
+}
+
+/// PostgreSQL function to demonstrate range query
+#[pg_extern(immutable, parallel_safe)]
+pub fn rtree_range_query_demo(
+    num_points: i32,
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+) -> Vec<i64> {
+    let mut geometries = Vec::new();
+
+    // Create test points
+    for i in 0..num_points {
+        let x = (i as f64 * 1.123) % 100.0;
+        let y = (i as f64 * 2.456) % 100.0;
+        let geom = crate::functions::make_point(x, y);
+        geometries.push(GeometryWithId::new(i as i64, geom));
+    }
+
+    let index = SpatialIndex::from_geometries(geometries);
+    let query_bbox = BBox::new(min_x, min_y, max_x, max_y);
+
+    index
+        .query_bbox(&query_bbox)
+        .into_iter()
+        .map(|g| g.id)
+        .collect()
+}
+
 /// Input/Output functions for BBox
 impl pgrx::InOutFuncs for BBox {
     fn input(input: &std::ffi::CStr) -> Self
@@ -146,8 +333,6 @@ impl pgrx::InOutFuncs for BBox {
         ));
     }
 }
-
-use serde::{Deserialize, Serialize};
 
 // GiST Index Support Functions
 // These functions are needed for PostgreSQL's GiST index implementation
@@ -198,26 +383,26 @@ pub fn geometry_gist_picksplit_left(entries: Vec<BBox>) -> Vec<BBox> {
 pub fn geometry_gist_picksplit_right(entries: Vec<BBox>) -> Vec<BBox> {
     // Simple split implementation - returns right half
     if entries.len() < 2 {
-        return vec![];
+        return Vec::new();
     }
 
     let mid = entries.len() / 2;
     entries[mid..].to_vec()
 }
 
-/// GiST same function - determines if two entries are identical
+/// GiST same function - determines if two entries are the same
 #[pg_extern(immutable, parallel_safe)]
 pub fn geometry_gist_same(a: BBox, b: BBox) -> bool {
     a == b
 }
 
-/// Extract bounding box from geometry for indexing
+/// GiST compress function - converts geometry to indexable form
 #[pg_extern(immutable, parallel_safe)]
 pub fn geometry_gist_compress(geom: Geometry) -> BBox {
     BBox::from_geometry(&geom)
 }
 
-/// Decompress is usually the identity function for our case
+/// GiST decompress function - converts index form back to geometry (simplified)
 #[pg_extern(immutable, parallel_safe)]
 pub fn geometry_gist_decompress(bbox: BBox) -> BBox {
     bbox
@@ -229,17 +414,17 @@ mod tests {
 
     #[test]
     fn test_bbox_creation() {
-        let bbox = BBox::new(0.0, 0.0, 10.0, 10.0);
+        let bbox = BBox::new(0.0, 0.0, 1.0, 1.0);
         assert_eq!(bbox.min_x, 0.0);
-        assert_eq!(bbox.max_x, 10.0);
-        assert_eq!(bbox.area(), 100.0);
+        assert_eq!(bbox.max_x, 1.0);
+        assert_eq!(bbox.area(), 1.0);
     }
 
     #[test]
     fn test_bbox_overlaps() {
-        let bbox1 = BBox::new(0.0, 0.0, 10.0, 10.0);
-        let bbox2 = BBox::new(5.0, 5.0, 15.0, 15.0);
-        let bbox3 = BBox::new(20.0, 20.0, 30.0, 30.0);
+        let bbox1 = BBox::new(0.0, 0.0, 1.0, 1.0);
+        let bbox2 = BBox::new(0.5, 0.5, 1.5, 1.5);
+        let bbox3 = BBox::new(2.0, 2.0, 3.0, 3.0);
 
         assert!(bbox1.overlaps(&bbox2));
         assert!(!bbox1.overlaps(&bbox3));
@@ -247,9 +432,9 @@ mod tests {
 
     #[test]
     fn test_bbox_contains() {
-        let bbox1 = BBox::new(0.0, 0.0, 10.0, 10.0);
-        let bbox2 = BBox::new(2.0, 2.0, 8.0, 8.0);
-        let bbox3 = BBox::new(5.0, 5.0, 15.0, 15.0);
+        let bbox1 = BBox::new(0.0, 0.0, 2.0, 2.0);
+        let bbox2 = BBox::new(0.5, 0.5, 1.5, 1.5);
+        let bbox3 = BBox::new(1.0, 1.0, 3.0, 3.0);
 
         assert!(bbox1.contains(&bbox2));
         assert!(!bbox1.contains(&bbox3));
@@ -257,13 +442,30 @@ mod tests {
 
     #[test]
     fn test_bbox_union() {
-        let bbox1 = BBox::new(0.0, 0.0, 5.0, 5.0);
-        let bbox2 = BBox::new(3.0, 3.0, 8.0, 8.0);
+        let bbox1 = BBox::new(0.0, 0.0, 1.0, 1.0);
+        let bbox2 = BBox::new(0.5, 0.5, 1.5, 1.5);
         let union = bbox1.union(&bbox2);
 
         assert_eq!(union.min_x, 0.0);
         assert_eq!(union.min_y, 0.0);
-        assert_eq!(union.max_x, 8.0);
-        assert_eq!(union.max_y, 8.0);
+        assert_eq!(union.max_x, 1.5);
+        assert_eq!(union.max_y, 1.5);
+    }
+
+    #[test]
+    fn test_spatial_index() {
+        use crate::functions::make_point;
+
+        let mut geometries = Vec::new();
+        geometries.push(GeometryWithId::new(1, make_point(0.0, 0.0)));
+        geometries.push(GeometryWithId::new(2, make_point(1.0, 1.0)));
+        geometries.push(GeometryWithId::new(3, make_point(2.0, 2.0)));
+
+        let index = SpatialIndex::from_geometries(geometries);
+        assert_eq!(index.size(), 3);
+
+        // Test nearest neighbor
+        let nearest = index.nearest_neighbor([0.1, 0.1]).unwrap();
+        assert_eq!(nearest.id, 1);
     }
 }

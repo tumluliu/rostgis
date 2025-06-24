@@ -1,5 +1,5 @@
 use crate::geometry::Geometry;
-use geo::{Area, EuclideanDistance, EuclideanLength};
+use geo::Area;
 use geo_types::{LineString, Point, Polygon};
 
 /// Create a Point geometry from WKT string
@@ -184,7 +184,11 @@ pub fn geometries_equal(geom1: Geometry, geom2: Geometry) -> bool {
 /// Calculate distance between two geometries
 pub fn geometries_distance(geom1: Geometry, geom2: Geometry) -> f64 {
     match (geom1, geom2) {
-        (Geometry::Point(p1, _), Geometry::Point(p2, _)) => p1.euclidean_distance(&p2),
+        (Geometry::Point(p1, _), Geometry::Point(p2, _)) => {
+            let dx = p1.x() - p2.x();
+            let dy = p1.y() - p2.y();
+            (dx * dx + dy * dy).sqrt()
+        }
         _ => 0.0, // Simplified for now
     }
 }
@@ -198,12 +202,26 @@ pub fn geometry_area(geom: Geometry) -> f64 {
     }
 }
 
-/// Calculate length of a geometry
+/// Calculate length of a geometry (simplified implementation)
 pub fn geometry_length(geom: Geometry) -> f64 {
     match geom {
-        Geometry::LineString(linestring, _) => linestring.euclidean_length(),
-        Geometry::MultiLineString(multilinestring, _) => multilinestring.euclidean_length(),
-        Geometry::Polygon(polygon, _) => polygon.exterior().euclidean_length(),
+        Geometry::LineString(linestring, _) => {
+            let coords: Vec<_> = linestring.coords().collect();
+            let mut length = 0.0;
+            for i in 1..coords.len() {
+                let dx = coords[i].x - coords[i - 1].x;
+                let dy = coords[i].y - coords[i - 1].y;
+                length += (dx * dx + dy * dy).sqrt();
+            }
+            length
+        }
+        Geometry::MultiLineString(multilinestring, _) => multilinestring
+            .iter()
+            .map(|ls| geometry_length(Geometry::LineString(ls.clone(), 0)))
+            .sum(),
+        Geometry::Polygon(polygon, _) => {
+            geometry_length(Geometry::LineString(polygon.exterior().clone(), 0))
+        }
         _ => 0.0,
     }
 }
@@ -212,9 +230,10 @@ pub fn geometry_length(geom: Geometry) -> f64 {
 pub fn geometry_perimeter(geom: Geometry) -> f64 {
     match geom {
         Geometry::Polygon(polygon, _) => {
-            let mut perimeter = polygon.exterior().euclidean_length();
+            let mut perimeter =
+                geometry_length(Geometry::LineString(polygon.exterior().clone(), 0));
             for interior in polygon.interiors() {
-                perimeter += interior.euclidean_length();
+                perimeter += geometry_length(Geometry::LineString(interior.clone(), 0));
             }
             perimeter
         }

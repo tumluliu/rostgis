@@ -8,6 +8,7 @@ pub mod functions;
 pub mod geometry;
 pub mod spatial_index;
 pub mod utils;
+pub mod vectorized_ops;
 
 use functions::*;
 use geometry::Geometry;
@@ -271,7 +272,6 @@ fn st_dwithin(geom1: Geometry, geom2: Geometry, distance: f64) -> bool {
 #[pg_schema]
 mod tests {
     use crate::*;
-    use pgrx::prelude::*;
 
     #[pg_test]
     fn test_rostgis_version() {
