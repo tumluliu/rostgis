@@ -1,6 +1,6 @@
 use crate::geometry::Geometry;
 use geo::{Area, EuclideanDistance, EuclideanLength};
-use geo_types::{LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon};
+use geo_types::{LineString, Point, Polygon};
 
 /// Create a Point geometry from WKT string
 pub fn geometry_from_wkt(

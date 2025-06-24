@@ -92,6 +92,126 @@ impl Geometry {
         // Z coordinate support would require extending geo-types or using a different approach
         None
     }
+
+    /// Calculate the bounding box of the geometry
+    /// Returns (min_x, min_y, max_x, max_y)
+    pub fn bounding_box(&self) -> (f64, f64, f64, f64) {
+        use geo::BoundingRect;
+
+        match self {
+            Geometry::Point(point, _) => {
+                let x = point.x();
+                let y = point.y();
+                (x, y, x, y)
+            }
+            Geometry::LineString(linestring, _) => {
+                if let Some(rect) = linestring.bounding_rect() {
+                    (rect.min().x, rect.min().y, rect.max().x, rect.max().y)
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                }
+            }
+            Geometry::Polygon(polygon, _) => {
+                if let Some(rect) = polygon.bounding_rect() {
+                    (rect.min().x, rect.min().y, rect.max().x, rect.max().y)
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                }
+            }
+            Geometry::MultiPoint(multipoint, _) => {
+                if let Some(rect) = multipoint.bounding_rect() {
+                    (rect.min().x, rect.min().y, rect.max().x, rect.max().y)
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                }
+            }
+            Geometry::MultiLineString(multilinestring, _) => {
+                if let Some(rect) = multilinestring.bounding_rect() {
+                    (rect.min().x, rect.min().y, rect.max().x, rect.max().y)
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                }
+            }
+            Geometry::MultiPolygon(multipolygon, _) => {
+                if let Some(rect) = multipolygon.bounding_rect() {
+                    (rect.min().x, rect.min().y, rect.max().x, rect.max().y)
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                }
+            }
+            Geometry::GeometryCollection(geometries, _) => {
+                if geometries.is_empty() {
+                    return (0.0, 0.0, 0.0, 0.0);
+                }
+
+                let mut min_x = f64::INFINITY;
+                let mut min_y = f64::INFINITY;
+                let mut max_x = f64::NEG_INFINITY;
+                let mut max_y = f64::NEG_INFINITY;
+
+                for geom in geometries {
+                    let (gmin_x, gmin_y, gmax_x, gmax_y) = geom.bounding_box();
+                    min_x = min_x.min(gmin_x);
+                    min_y = min_y.min(gmin_y);
+                    max_x = max_x.max(gmax_x);
+                    max_y = max_y.max(gmax_y);
+                }
+
+                (min_x, min_y, max_x, max_y)
+            }
+        }
+    }
+
+    /// Check if this geometry's bounding box overlaps with another's
+    /// This is the && operator implementation for spatial indexing
+    pub fn bbox_overlaps(&self, other: &Geometry) -> bool {
+        let (min_x1, min_y1, max_x1, max_y1) = self.bounding_box();
+        let (min_x2, min_y2, max_x2, max_y2) = other.bounding_box();
+
+        // Two rectangles overlap if they overlap in both X and Y dimensions
+        !(max_x1 < min_x2 || max_x2 < min_x1 || max_y1 < min_y2 || max_y2 < min_y1)
+    }
+
+    /// Check if this geometry's bounding box contains another's
+    pub fn bbox_contains(&self, other: &Geometry) -> bool {
+        let (min_x1, min_y1, max_x1, max_y1) = self.bounding_box();
+        let (min_x2, min_y2, max_x2, max_y2) = other.bounding_box();
+
+        min_x1 <= min_x2 && min_y1 <= min_y2 && max_x1 >= max_x2 && max_y1 >= max_y2
+    }
+
+    /// Check if this geometry's bounding box is contained by another's
+    pub fn bbox_within(&self, other: &Geometry) -> bool {
+        other.bbox_contains(self)
+    }
+
+    /// Check if this geometry's bounding box is to the left of another's
+    pub fn bbox_left(&self, other: &Geometry) -> bool {
+        let (_, _, max_x1, _) = self.bounding_box();
+        let (min_x2, _, _, _) = other.bounding_box();
+        max_x1 < min_x2
+    }
+
+    /// Check if this geometry's bounding box is to the right of another's
+    pub fn bbox_right(&self, other: &Geometry) -> bool {
+        let (min_x1, _, _, _) = self.bounding_box();
+        let (_, _, max_x2, _) = other.bounding_box();
+        min_x1 > max_x2
+    }
+
+    /// Check if this geometry's bounding box is below another's
+    pub fn bbox_below(&self, other: &Geometry) -> bool {
+        let (_, _, _, max_y1) = self.bounding_box();
+        let (_, min_y2, _, _) = other.bounding_box();
+        max_y1 < min_y2
+    }
+
+    /// Check if this geometry's bounding box is above another's
+    pub fn bbox_above(&self, other: &Geometry) -> bool {
+        let (_, min_y1, _, _) = self.bounding_box();
+        let (_, _, _, max_y2) = other.bounding_box();
+        min_y1 > max_y2
+    }
 }
 
 impl fmt::Display for Geometry {

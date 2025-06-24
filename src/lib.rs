@@ -6,10 +6,12 @@ use pgrx::prelude::*;
 // Re-export modules
 pub mod functions;
 pub mod geometry;
+pub mod spatial_index;
 pub mod utils;
 
 use functions::*;
 use geometry::Geometry;
+use spatial_index::{geometry_gist_compress, BBox};
 
 // Extension initialization
 #[pg_extern]
@@ -126,6 +128,144 @@ fn st_perimeter(geom: Geometry) -> f64 {
     geometry_perimeter(geom)
 }
 
+// Spatial indexing functions
+#[pg_extern]
+fn st_envelope(geom: Geometry) -> BBox {
+    geometry_gist_compress(geom)
+}
+
+// Spatial operators for indexing support
+// These operators work on bounding boxes and can utilize spatial indexes
+
+/// Bounding box overlap operator (&&)
+/// This is the most commonly used spatial operator for index acceleration
+#[pg_operator(immutable, parallel_safe)]
+#[opname(&&)]
+fn geometry_overlap(left: Geometry, right: Geometry) -> bool {
+    left.bbox_overlaps(&right)
+}
+
+/// Bounding box left operator (<<)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(<<)]
+fn geometry_left(left: Geometry, right: Geometry) -> bool {
+    left.bbox_left(&right)
+}
+
+/// Bounding box right operator (>>)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(>>)]
+fn geometry_right(left: Geometry, right: Geometry) -> bool {
+    left.bbox_right(&right)
+}
+
+/// Bounding box below operator (<<|)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(<<|)]
+fn geometry_below(left: Geometry, right: Geometry) -> bool {
+    left.bbox_below(&right)
+}
+
+/// Bounding box above operator (|>>)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(|>>)]
+fn geometry_above(left: Geometry, right: Geometry) -> bool {
+    left.bbox_above(&right)
+}
+
+/// Bounding box contains operator (~)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(~)]
+fn geometry_contains_bbox(left: Geometry, right: Geometry) -> bool {
+    left.bbox_contains(&right)
+}
+
+/// Bounding box contained by operator (@)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(@)]
+fn geometry_within_bbox(left: Geometry, right: Geometry) -> bool {
+    left.bbox_within(&right)
+}
+
+/// Overlap left operator (&<)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(&<)]
+fn geometry_overleft(left: Geometry, right: Geometry) -> bool {
+    !left.bbox_right(&right)
+}
+
+/// Overlap right operator (&>)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(&>)]
+fn geometry_overright(left: Geometry, right: Geometry) -> bool {
+    !left.bbox_left(&right)
+}
+
+/// Overlap below operator (&<|)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(&<|)]
+fn geometry_overbelow(left: Geometry, right: Geometry) -> bool {
+    !left.bbox_above(&right)
+}
+
+/// Overlap above operator (|&>)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(|&>)]
+fn geometry_overabove(left: Geometry, right: Geometry) -> bool {
+    !left.bbox_below(&right)
+}
+
+/// Same bounding box operator (~=)
+#[pg_operator(immutable, parallel_safe)]
+#[opname(~=)]
+fn geometry_same_bbox(left: Geometry, right: Geometry) -> bool {
+    let (min_x1, min_y1, max_x1, max_y1) = left.bounding_box();
+    let (min_x2, min_y2, max_x2, max_y2) = right.bounding_box();
+
+    (min_x1 - min_x2).abs() < f64::EPSILON
+        && (min_y1 - min_y2).abs() < f64::EPSILON
+        && (max_x1 - max_x2).abs() < f64::EPSILON
+        && (max_y1 - max_y2).abs() < f64::EPSILON
+}
+
+// Spatial relationship functions that can use indexes
+#[pg_extern]
+fn st_intersects(geom1: Geometry, geom2: Geometry) -> bool {
+    // First check bounding box overlap (can use index)
+    if !geom1.bbox_overlaps(&geom2) {
+        return false;
+    }
+
+    // For now, if bboxes overlap, assume intersection
+    // In a full implementation, this would do exact geometric intersection testing
+    true
+}
+
+#[pg_extern]
+fn st_contains(geom1: Geometry, geom2: Geometry) -> bool {
+    // First check bounding box containment (can use index)
+    if !geom1.bbox_contains(&geom2) {
+        return false;
+    }
+
+    // For now, if bbox contains, assume geometric containment
+    // In a full implementation, this would do exact geometric containment testing
+    true
+}
+
+#[pg_extern]
+fn st_within(geom1: Geometry, geom2: Geometry) -> bool {
+    st_contains(geom2, geom1)
+}
+
+#[pg_extern]
+fn st_dwithin(geom1: Geometry, geom2: Geometry, distance: f64) -> bool {
+    // This is a simplified implementation
+    // A proper implementation would expand the bounding box by the distance
+    let actual_distance = geometries_distance(geom1, geom2);
+    actual_distance <= distance
+}
+
 // Test module
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
@@ -179,6 +319,32 @@ mod tests {
 
         let point_with_srid = crate::st_setsrid(crate::st_makepoint(1.0, 2.0), 4326);
         assert_eq!(crate::st_srid(point_with_srid), 4326);
+    }
+
+    #[pg_test]
+    fn test_spatial_operators() {
+        let point1 = crate::st_makepoint(0.0, 0.0);
+        let point2 = crate::st_makepoint(1.0, 1.0);
+        let point3 = crate::st_makepoint(10.0, 10.0);
+
+        // Test overlap (points always overlap themselves for bounding box purposes)
+        assert!(crate::geometry_overlap(point1.clone(), point1.clone()));
+
+        // Test spatial relationships
+        assert!(crate::st_intersects(point1.clone(), point1.clone()));
+        assert!(crate::st_dwithin(point1.clone(), point2.clone(), 2.0));
+        assert!(!crate::st_dwithin(point1.clone(), point3.clone(), 1.0));
+    }
+
+    #[pg_test]
+    fn test_st_envelope() {
+        let point = crate::st_makepoint(1.0, 2.0);
+        let bbox = crate::st_envelope(point);
+        // For a point, the envelope should be the point coordinates
+        assert_eq!(bbox.min_x, 1.0);
+        assert_eq!(bbox.min_y, 2.0);
+        assert_eq!(bbox.max_x, 1.0);
+        assert_eq!(bbox.max_y, 2.0);
     }
 }
 

@@ -1,0 +1,151 @@
+Timing is on.
+==========================================
+RostGIS vs PostGIS Performance Benchmark
+Without Spatial Indexing
+==========================================
+psql:sql/performance_benchmark.sql:22: NOTICE:  PostGIS not found. Some comparisons will be skipped.
+DO
+Time: 1.134 ms
+psql:sql/performance_benchmark.sql:25: NOTICE:  table "benchmark_results" does not exist, skipping
+DROP TABLE
+Time: 0.042 ms
+CREATE TABLE
+Time: 1.255 ms
+psql:sql/performance_benchmark.sql:36: NOTICE:  table "rostgis_points" does not exist, skipping
+psql:sql/performance_benchmark.sql:36: NOTICE:  table "postgis_points" does not exist, skipping
+DROP TABLE
+Time: 0.056 ms
+psql:sql/performance_benchmark.sql:37: NOTICE:  table "rostgis_bulk_test" does not exist, skipping
+psql:sql/performance_benchmark.sql:37: NOTICE:  table "postgis_bulk_test" does not exist, skipping
+DROP TABLE
+Time: 0.035 ms
+
+=== TEST 1: Point Creation Performance ===
+Testing RostGIS point creation...
+CREATE TABLE
+Time: 0.912 ms
+Timing is on.
+INSERT 0 10000
+Time: 11.998 ms
+Timing is off.
+DO
+DO
+
+=== TEST 2: WKT Parsing Performance ===
+DO
+
+=== TEST 3: Distance Calculation Performance ===
+DO
+
+=== TEST 4: Sequential Scan Performance (No Index) ===
+psql:sql/performance_benchmark.sql:174: NOTICE:  table "scan_test_rostgis" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+INSERT 0 50000
+Testing spatial overlap queries...
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1 loops=1)
+   Buffers: shared hit=486
+   ->  Seq Scan on scan_test_rostgis (actual rows=0 loops=1)
+         Filter: (geom && st_makepoint('-122'::double precision, '37'::double precision))
+         Rows Removed by Filter: 50000
+         Buffers: shared hit=486
+ Planning:
+   Buffers: shared hit=5
+ Planning Time: 0.039 ms
+ Execution Time: 19.468 ms
+(10 rows)
+
+                                                  QUERY PLAN                                                  
+--------------------------------------------------------------------------------------------------------------
+ Limit (actual rows=1 loops=1)
+   Buffers: shared hit=15685549
+   ->  Aggregate (actual rows=1 loops=1)
+         Buffers: shared hit=15685549
+         ->  Nested Loop (actual rows=60374 loops=1)
+               Buffers: shared hit=15685549
+               ->  Seq Scan on scan_test_rostgis a (actual rows=50000 loops=1)
+                     Buffers: shared hit=486
+               ->  Index Scan using scan_test_rostgis_pkey on scan_test_rostgis b (actual rows=1 loops=50000)
+                     Index Cond: (id > a.id)
+                     Filter: st_dwithin(a.geom, geom, '1'::double precision)
+                     Rows Removed by Filter: 24998
+                     Buffers: shared hit=15685063
+ Planning:
+   Buffers: shared hit=61
+ Planning Time: 0.070 ms
+ Execution Time: 254072.396 ms
+(17 rows)
+
+
+=== TEST 5: Bulk Operations Performance ===
+psql:sql/performance_benchmark.sql:230: NOTICE:  table "bulk_insert_rostgis" does not exist, skipping
+DO
+
+=== TEST 6: GeoJSON Serialization Performance ===
+DO
+
+=== TEST 7: Memory Usage Analysis ===
+ schemaname | tablename | attname | n_distinct | correlation | most_common_vals 
+------------+-----------+---------+------------+-------------+------------------
+(0 rows)
+
+      tablename      | total_size | table_size | index_size 
+---------------------+------------+------------+------------
+ rostgis_points      | 944 kB     | 672 kB     | 272 kB
+ scan_test_rostgis   | 5032 kB    | 3888 kB    | 1144 kB
+ bulk_insert_rostgis | 2272 kB    | 1672 kB    | 600 kB
+(3 rows)
+
+
+=== BENCHMARK RESULTS SUMMARY ===
+         test_name         | implementation | exec_time_ms | ops_per_sec | improvement_pct 
+---------------------------+----------------+--------------+-------------+-----------------
+ bulk_insert_25k           | rostgis        |        25.80 |      968992 |                
+ distance_calculation_100k | rostgis        |        25.53 |     3917114 |                
+ geojson_linestring        | rostgis        |        18.05 |     1385195 |                
+ geojson_point             | rostgis        |         6.48 |     3856834 |                
+ geojson_polygon           | rostgis        |        25.20 |      992221 |                
+ point_creation_100k       | rostgis        |        29.52 |     3387304 |                
+ wkt_parsing_linestring    | rostgis        |        42.27 |     1182844 |                
+ wkt_parsing_point         | rostgis        |        18.22 |     2743936 |                
+ wkt_parsing_polygon       | rostgis        |        57.37 |      871520 |                
+(9 rows)
+
+         test_name         | rostgis_ops_sec | postgis_ops_sec | rostgis_improvement 
+---------------------------+-----------------+-----------------+---------------------
+ bulk_insert_25k           |          968992 |               0 | N/A
+ distance_calculation_100k |         3917114 |               0 | N/A
+ geojson_linestring        |         1385195 |               0 | N/A
+ geojson_point             |         3856834 |               0 | N/A
+ geojson_polygon           |          992221 |               0 | N/A
+ point_creation_100k       |         3387304 |               0 | N/A
+ wkt_parsing_linestring    |         1182844 |               0 | N/A
+ wkt_parsing_point         |         2743936 |               0 | N/A
+ wkt_parsing_polygon       |          871520 |               0 | N/A
+(9 rows)
+
+
+=== PERFORMANCE VISUALIZATION ===
+ implementation |  performance  |                              bar_chart                              
+----------------+---------------+---------------------------------------------------------------------
+ rostgis        | 3387K ops/sec | ███████████████████████████████████████████████████████████████████
+(1 row)
+
+
+=== MEMORY EFFICIENCY REPORT ===
+    metric     | value 
+---------------+-------
+ Database Size | 16 MB
+(1 row)
+
+
+=== CLEANUP OPTIONS ===
+To clean up test data, run:
+DROP TABLE IF EXISTS rostgis_points, postgis_points, scan_test_rostgis, bulk_insert_rostgis, benchmark_results;
+
+==========================================
+Benchmark Complete!
+Results saved in benchmark_results table
+==========================================
