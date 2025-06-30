@@ -22,7 +22,7 @@ pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg_test = []
 
 [dependencies]
-pgrx = "=0.14.3"
+pgrx = "0.15.0"
 # Geometry processing libraries
 geo = "~0.30"
 geo-types = "~0.7"
@@ -40,7 +40,7 @@ geoarrow-array = "~0.4"
 geoarrow-schema = "~0.4"
 
 [dev-dependencies]
-pgrx-tests = "=0.14.3"
+pgrx-tests = "0.15.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 

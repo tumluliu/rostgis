@@ -137,8 +137,8 @@ generate_report() {
 - RostGIS Extension: Installed
 - PostGIS Extension: $(psql -U "$POSTGRES_USER" -d "$DB_NAME" -t -c "SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_extension WHERE extname='postgis') THEN 'Available' ELSE 'Not Available' END;" | tr -d ' ')
 - System: $(uname -s) $(uname -r)
-- CPU: $(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | sed 's/^[ \t]*//' || echo "Unknown")
-- Memory: $(free -h | grep '^Mem:' | awk '{print $2}' || echo "Unknown")
+- CPU: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | sed 's/^[ \t]*//' || echo "Unknown")
+- Memory: $(system_profiler SPHardwareDataType 2>/dev/null | grep "Memory:" | awk '{print $2 " " $3}' || free -h 2>/dev/null | grep '^Mem:' | awk '{print $2}' || echo "Unknown")
 
 ## Performance Results
 
@@ -146,6 +146,19 @@ EOF
 
     # Add benchmark results to report
     psql -U "$POSTGRES_USER" -d "$DB_NAME" -c "
+    WITH benchmark_with_improvement AS (
+        SELECT 
+            test_name,
+            implementation,
+            execution_time_ms,
+            operations_per_second,
+            CASE 
+                WHEN LAG(operations_per_second) OVER (PARTITION BY test_name ORDER BY implementation) IS NOT NULL
+                THEN ROUND(((operations_per_second / LAG(operations_per_second) OVER (PARTITION BY test_name ORDER BY implementation)) - 1) * 100, 1) || '%'
+                ELSE '-'
+            END as improvement
+        FROM benchmark_results
+    )
     SELECT 
         '### ' || UPPER(REPLACE(test_name, '_', ' ')) || E'\n\n' ||
         '| Implementation | Execution Time (ms) | Operations/sec | Improvement |' || E'\n' ||
@@ -154,16 +167,10 @@ EOF
             '| ' || INITCAP(implementation) || 
             ' | ' || ROUND(execution_time_ms, 2) || 
             ' | ' || ROUND(operations_per_second, 0) || 
-            ' | ' || COALESCE(
-                CASE 
-                    WHEN LAG(operations_per_second) OVER (ORDER BY implementation) IS NOT NULL
-                    THEN ROUND(((operations_per_second / LAG(operations_per_second) OVER (ORDER BY implementation)) - 1) * 100, 1) || '%'
-                    ELSE '-'
-                END, '-'
-            ) || ' |',
+            ' | ' || improvement || ' |',
             E'\n'
         ) || E'\n\n'
-    FROM benchmark_results
+    FROM benchmark_with_improvement
     GROUP BY test_name
     ORDER BY test_name;
     " -t >> "$report_file"

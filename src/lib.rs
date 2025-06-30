@@ -12,7 +12,9 @@ pub mod vectorized_ops;
 
 use functions::*;
 use geometry::Geometry;
-use spatial_index::{geometry_gist_compress, BBox};
+// Import spatial indexing support
+// Note: GistBBox functions available but using simpler bbox approach for now
+use spatial_index::BBox;
 
 // Extension initialization
 #[pg_extern]
@@ -132,7 +134,15 @@ fn st_perimeter(geom: Geometry) -> f64 {
 // Spatial indexing functions
 #[pg_extern]
 fn st_envelope(geom: Geometry) -> BBox {
-    geometry_gist_compress(geom)
+    BBox::from_geometry(&geom)
+}
+
+/// Simple compress function for spatial indexing
+/// Converts geometry to bounding box string in PostgreSQL box format
+#[pg_extern(immutable, parallel_safe)]
+fn geometry_to_box(geom: Geometry) -> String {
+    let (min_x, min_y, max_x, max_y) = geom.bounding_box();
+    format!("(({},{}),({},{}))", min_x, min_y, max_x, max_y)
 }
 
 // Spatial operators for indexing support

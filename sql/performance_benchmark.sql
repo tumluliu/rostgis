@@ -196,11 +196,12 @@ EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, COSTS OFF)
 SELECT COUNT(*) FROM scan_test_rostgis 
 WHERE geom && ST_MakePoint(-122, 37);
 
--- Test spatial relationship queries
+-- Test spatial relationship queries (limit to reasonable subset to avoid extreme runtime)
 EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, COSTS OFF)
-SELECT COUNT(*) FROM scan_test_rostgis a, scan_test_rostgis b
-WHERE a.id < b.id AND ST_DWithin(a.geom, b.geom, 1.0)
-LIMIT 1000;
+SELECT COUNT(*) FROM 
+    (SELECT * FROM scan_test_rostgis LIMIT 100) a, 
+    (SELECT * FROM scan_test_rostgis LIMIT 100) b
+WHERE a.id < b.id AND ST_DWithin(a.geom, b.geom, 1.0);
 
 \echo ''
 \echo '=== TEST 5: Bulk Operations Performance ==='

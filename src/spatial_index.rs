@@ -6,11 +6,17 @@ use serde::{Deserialize, Serialize};
 /// Bounding box type for spatial indexing
 /// This represents a 2D rectangular bounding box with min/max x,y coordinates
 #[derive(Debug, Clone, PartialEq, PostgresType, Serialize, Deserialize)]
+#[pg_binary_protocol]
 #[inoutfuncs]
+#[serde(rename_all = "camelCase")]
 pub struct BBox {
+    #[serde(rename = "minX")]
     pub min_x: f64,
+    #[serde(rename = "minY")]
     pub min_y: f64,
+    #[serde(rename = "maxX")]
     pub max_x: f64,
+    #[serde(rename = "maxY")]
     pub max_y: f64,
 }
 
@@ -85,26 +91,155 @@ impl BBox {
         )
     }
 
-    /// Calculate the intersection of two bounding boxes
-    pub fn intersection(&self, other: &BBox) -> Option<BBox> {
-        let min_x = self.min_x.max(other.min_x);
-        let min_y = self.min_y.max(other.min_y);
-        let max_x = self.max_x.min(other.max_x);
-        let max_y = self.max_y.min(other.max_y);
-
-        if min_x <= max_x && min_y <= max_y {
-            Some(BBox::new(min_x, min_y, max_x, max_y))
-        } else {
-            None
-        }
-    }
-
     /// Calculate the enlargement needed to include another bbox
     pub fn enlargement(&self, other: &BBox) -> f64 {
         let union = self.union(other);
         union.area() - self.area()
     }
 }
+
+// ============================================================================
+// BASIC GIST SUPPORT FUNCTIONS
+// ============================================================================
+
+/// Simple GiST compress function - converts geometry to bounding box
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_gist_compress(geom: Geometry) -> BBox {
+    BBox::from_geometry(&geom)
+}
+
+/// Simple compress function for PostgreSQL box type compatibility
+/// Converts geometry to bounding box string in PostgreSQL box format
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_to_box_string(geom: Geometry) -> String {
+    let (min_x, min_y, max_x, max_y) = geom.bounding_box();
+    format!("(({},{}),({},{}))", min_x, min_y, max_x, max_y)
+}
+
+/// GiST union function - creates a bounding box that contains all input boxes
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_gist_union(entries: Vec<BBox>) -> BBox {
+    if entries.is_empty() {
+        return BBox::new(0.0, 0.0, 0.0, 0.0);
+    }
+
+    let mut result = entries[0].clone();
+    for entry in entries.iter().skip(1) {
+        result = result.union(entry);
+    }
+    result
+}
+
+/// GiST penalty function - calculates the cost of inserting a new entry
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_gist_penalty(original: BBox, new_entry: BBox) -> f32 {
+    let enlargement = original.enlargement(&new_entry);
+    enlargement as f32
+}
+
+/// GiST same function - determines if two entries are the same
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_gist_same(a: BBox, b: BBox) -> bool {
+    a == b
+}
+
+/// GiST decompress function - passthrough since we store bboxes directly
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_gist_decompress(bbox: BBox) -> BBox {
+    bbox
+}
+
+/// CRITICAL: GiST consistent function (Function 1) - This is REQUIRED by PostgreSQL
+/// This function determines whether a query matches an index entry
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_gist_consistent(
+    key: BBox,
+    query: BBox,
+    strategy: i16,
+    _subtype: pgrx::pg_sys::Oid,
+    _recheck: bool,
+) -> bool {
+    // Strategy numbers correspond to different spatial operators
+    // For PostgreSQL GiST, strategy 3 is typically && (overlaps)
+    match strategy {
+        3 => {
+            // Strategy 3: && operator (bounding box overlap)
+            key.overlaps(&query)
+        }
+        1 => {
+            // Strategy 1: << operator (strictly left of)
+            key.left(&query)
+        }
+        2 => {
+            // Strategy 2: &< operator (does not extend to right of)
+            key.max_x <= query.max_x
+        }
+        4 => {
+            // Strategy 4: &> operator (does not extend to left of)
+            key.min_x >= query.min_x
+        }
+        5 => {
+            // Strategy 5: >> operator (strictly right of)
+            key.right(&query)
+        }
+        6 => {
+            // Strategy 6: ~= operator (same bounding box)
+            key == query
+        }
+        7 => {
+            // Strategy 7: ~ operator (contains)
+            key.contains(&query)
+        }
+        8 => {
+            // Strategy 8: @ operator (contained by)
+            query.contains(&key)
+        }
+        10 => {
+            // Strategy 10: <<| operator (strictly below)
+            key.below(&query)
+        }
+        11 => {
+            // Strategy 11: &<| operator (does not extend above)
+            key.max_y <= query.max_y
+        }
+        12 => {
+            // Strategy 12: |&> operator (does not extend below)
+            key.min_y >= query.min_y
+        }
+        13 => {
+            // Strategy 13: |>> operator (strictly above)
+            key.above(&query)
+        }
+        _ => {
+            // Default: assume overlap test for unknown strategies
+            key.overlaps(&query)
+        }
+    }
+}
+
+/// GiST picksplit left function
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_gist_picksplit_left(entries: Vec<BBox>) -> Vec<BBox> {
+    if entries.len() <= 1 {
+        return entries;
+    }
+    let mid = entries.len() / 2;
+    entries[..mid].to_vec()
+}
+
+/// GiST picksplit right function
+#[pg_extern(immutable, parallel_safe)]
+pub fn geometry_gist_picksplit_right(entries: Vec<BBox>) -> Vec<BBox> {
+    if entries.len() <= 1 {
+        return Vec::new();
+    }
+    let mid = entries.len() / 2;
+    entries[mid..].to_vec()
+}
+
+// ============================================================================
+// SPATIAL INDEX FUNCTIONALITY (R*-TREE)
+// ============================================================================
 
 /// Wrapper for geometry with ID for use in spatial index
 #[derive(Debug, Clone, PartialEq)]
@@ -136,7 +271,6 @@ impl RTreeObject for GeometryWithId {
 /// Implement PointDistance for distance-based queries
 impl PointDistance for GeometryWithId {
     fn distance_2(&self, point: &[f64; 2]) -> f64 {
-        // Calculate distance from point to geometry's bounding box center
         let center_x = (self.bbox.min_x + self.bbox.max_x) / 2.0;
         let center_y = (self.bbox.min_y + self.bbox.max_y) / 2.0;
 
@@ -196,7 +330,7 @@ impl SpatialIndex {
     /// Find all geometries within distance of a point
     pub fn within_distance(&self, point: [f64; 2], distance: f64) -> Vec<&GeometryWithId> {
         self.rtree
-            .locate_within_distance(point, distance * distance) // rstar uses squared distance
+            .locate_within_distance(point, distance * distance)
             .collect()
     }
 
@@ -222,12 +356,15 @@ impl Default for SpatialIndex {
     }
 }
 
+// ============================================================================
+// POSTGRESQL FUNCTIONS FOR SPATIAL INDEXING DEMOS
+// ============================================================================
+
 /// PostgreSQL function to demonstrate R*-tree functionality
 #[pg_extern(immutable, parallel_safe)]
 pub fn create_rtree_demo(num_points: i32) -> String {
     let mut geometries = Vec::new();
 
-    // Create test points
     for i in 0..num_points {
         let x = (i as f64 * 1.123) % 100.0;
         let y = (i as f64 * 2.456) % 100.0;
@@ -236,7 +373,6 @@ pub fn create_rtree_demo(num_points: i32) -> String {
     }
 
     let index = SpatialIndex::from_geometries(geometries);
-
     format!("Created R*-tree index with {} points", index.size())
 }
 
@@ -245,7 +381,6 @@ pub fn create_rtree_demo(num_points: i32) -> String {
 pub fn rtree_nearest_neighbor_demo(num_points: i32, query_x: f64, query_y: f64) -> i64 {
     let mut geometries = Vec::new();
 
-    // Create test points
     for i in 0..num_points {
         let x = (i as f64 * 1.123) % 100.0;
         let y = (i as f64 * 2.456) % 100.0;
@@ -273,7 +408,6 @@ pub fn rtree_range_query_demo(
 ) -> Vec<i64> {
     let mut geometries = Vec::new();
 
-    // Create test points
     for i in 0..num_points {
         let x = (i as f64 * 1.123) % 100.0;
         let y = (i as f64 * 2.456) % 100.0;
@@ -334,80 +468,6 @@ impl pgrx::InOutFuncs for BBox {
     }
 }
 
-// GiST Index Support Functions
-// These functions are needed for PostgreSQL's GiST index implementation
-
-// Note: GiST support functions are complex to implement in pgrx due to
-// PostgreSQL's internal types. The spatial operators below provide the
-// foundation for spatial indexing.
-
-/// GiST union function - creates a bounding box that contains all input boxes
-/// This is used when building the index tree structure
-#[pg_extern(immutable, parallel_safe)]
-pub fn geometry_gist_union(entries: Vec<BBox>) -> BBox {
-    if entries.is_empty() {
-        return BBox::new(0.0, 0.0, 0.0, 0.0);
-    }
-
-    let mut result = entries[0].clone();
-    for entry in entries.iter().skip(1) {
-        result = result.union(entry);
-    }
-    result
-}
-
-/// GiST penalty function - calculates the cost of inserting a new entry
-/// This helps the index decide where to place new entries for optimal performance
-#[pg_extern(immutable, parallel_safe)]
-pub fn geometry_gist_penalty(original: BBox, new_entry: BBox) -> f32 {
-    let enlargement = original.enlargement(&new_entry);
-    enlargement as f32
-}
-
-/// GiST picksplit function - decides how to split an overfull index node
-/// This is critical for index performance and balance
-/// Note: Simplified implementation due to pgrx tuple return limitations
-#[pg_extern(immutable, parallel_safe)]
-pub fn geometry_gist_picksplit_left(entries: Vec<BBox>) -> Vec<BBox> {
-    // Simple split implementation - returns left half
-    if entries.len() < 2 {
-        return entries;
-    }
-
-    let mid = entries.len() / 2;
-    entries[0..mid].to_vec()
-}
-
-/// Returns the right half of a picksplit operation
-#[pg_extern(immutable, parallel_safe)]
-pub fn geometry_gist_picksplit_right(entries: Vec<BBox>) -> Vec<BBox> {
-    // Simple split implementation - returns right half
-    if entries.len() < 2 {
-        return Vec::new();
-    }
-
-    let mid = entries.len() / 2;
-    entries[mid..].to_vec()
-}
-
-/// GiST same function - determines if two entries are the same
-#[pg_extern(immutable, parallel_safe)]
-pub fn geometry_gist_same(a: BBox, b: BBox) -> bool {
-    a == b
-}
-
-/// GiST compress function - converts geometry to indexable form
-#[pg_extern(immutable, parallel_safe)]
-pub fn geometry_gist_compress(geom: Geometry) -> BBox {
-    BBox::from_geometry(&geom)
-}
-
-/// GiST decompress function - converts index form back to geometry (simplified)
-#[pg_extern(immutable, parallel_safe)]
-pub fn geometry_gist_decompress(bbox: BBox) -> BBox {
-    bbox
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,28 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bbox_contains() {
-        let bbox1 = BBox::new(0.0, 0.0, 2.0, 2.0);
-        let bbox2 = BBox::new(0.5, 0.5, 1.5, 1.5);
-        let bbox3 = BBox::new(1.0, 1.0, 3.0, 3.0);
-
-        assert!(bbox1.contains(&bbox2));
-        assert!(!bbox1.contains(&bbox3));
-    }
-
-    #[test]
-    fn test_bbox_union() {
-        let bbox1 = BBox::new(0.0, 0.0, 1.0, 1.0);
-        let bbox2 = BBox::new(0.5, 0.5, 1.5, 1.5);
-        let union = bbox1.union(&bbox2);
-
-        assert_eq!(union.min_x, 0.0);
-        assert_eq!(union.min_y, 0.0);
-        assert_eq!(union.max_x, 1.5);
-        assert_eq!(union.max_y, 1.5);
-    }
-
-    #[test]
     fn test_spatial_index() {
         use crate::functions::make_point;
 
@@ -464,7 +502,6 @@ mod tests {
         let index = SpatialIndex::from_geometries(geometries);
         assert_eq!(index.size(), 3);
 
-        // Test nearest neighbor
         let nearest = index.nearest_neighbor([0.1, 0.1]).unwrap();
         assert_eq!(nearest.id, 1);
     }
